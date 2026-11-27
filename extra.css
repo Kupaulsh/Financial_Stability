@@ -103,3 +103,11 @@ html, body { overflow:hidden; overscroll-behavior:none; }   /* html/body are alr
 
 /* The sheet backdrop must never trap the top nav */
 .sheet-backdrop { top:64px; }
+
+/* Home: single transaction list + analysis section */
+.tx-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+.tx-head .section-title { margin:0; }
+.tx-head select { width:auto; min-width:120px; max-width:50%; }
+.analysis-box { margin-top:16px; }
+.analysis-section .a-tiles { grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); }
+@media (min-width:900px){ .analysis-section { display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start; } .analysis-section > .a-range, .analysis-section > .a-tiles, .analysis-section > .a-empty { grid-column:1 / -1; } }

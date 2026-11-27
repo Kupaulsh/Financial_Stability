@@ -607,10 +607,11 @@
     today = today || todayISO();
     let gained = 0, spent = 0;
     STATE.transactions.forEach((t) => {
-      if (t.date !== today || !t.meta || !t.meta.startsWith("Instant")) return;
+      if (t.date !== today) return;
       if (accId !== "overall" && t.accountId !== accId) return;
-      if (t.page === "Income" && t.amount > 0) gained += t.amount;
-      else if (t.page === "Expense" && t.amount < 0) spent += -t.amount;
+      const k = txKind(t);
+      if (t.page === "Income" && t.amount > 0 && k !== "transfer" && k !== "loan") gained += t.amount;
+      else if (t.page === "Expense" && t.amount < 0 && k !== "transfer" && k !== "loanpay" && k !== "creditpay") spent += -t.amount;
     });
     return { gained: round2(gained), spent: round2(spent) };
   }
@@ -982,17 +983,17 @@
     btn.innerHTML = "<span>".concat(esc(title), '</span><span class="dd-count">').concat(esc(count), '</span><span class="material-icons-outlined dd-arrow">expand_more</span>');
     const panel = el("div", "dd-panel");
     panel.appendChild(buildPanel());
-    const sync = () => {
+    const sync2 = () => {
       wrap.classList.toggle("open", open());
       btn.setAttribute("aria-expanded", String(open()));
     };
     btn.addEventListener("click", () => {
       ddOpen.set(key, !open());
-      sync();
+      sync2();
     });
     wrap.appendChild(btn);
     wrap.appendChild(panel);
-    sync();
+    sync2();
     return wrap;
   }
   var NOTE_MAX = 24;
@@ -1093,8 +1094,289 @@
     return box;
   }
 
+  // src/analysis.js
+  var RANGES = [
+    { key: "week", label: "Week" },
+    { key: "month", label: "Month" },
+    { key: "year", label: "Year" }
+  ];
+  var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var DAYN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  function rangeBounds(key, today) {
+    let from;
+    if (key === "week") from = addDaysISO(today, -6);
+    else if (key === "year") from = today.slice(0, 4) + "-01-01";
+    else from = today.slice(0, 7) + "-01";
+    return { from, to: today, days: daysBetween(from, today) + 1 };
+  }
+  function prevBounds(key, from) {
+    if (key === "week") {
+      const to = addDaysISO(from, -1);
+      return { from: addDaysISO(to, -6), to, days: 7 };
+    }
+    const f = parseISO(from);
+    if (key === "year") {
+      const y = f.getFullYear() - 1;
+      return { from: "".concat(y, "-01-01"), to: "".concat(y, "-12-31"), days: daysBetween("".concat(y, "-01-01"), "".concat(y, "-12-31")) + 1 };
+    }
+    const pm = new Date(f.getFullYear(), f.getMonth() - 1, 1), dim = daysInMonth(pm.getFullYear(), pm.getMonth());
+    const pf = isoDate(pm), pt = isoDate(new Date(pm.getFullYear(), pm.getMonth(), dim));
+    return { from: pf, to: pt, days: dim };
+  }
+  function sums(list) {
+    const s = { earned: 0, interest: 0, spent: 0, debt: 0, borrowed: 0, byCat: {} };
+    list.forEach((t) => {
+      const k = txKind(t);
+      if (t.page === "Income" && t.amount > 0) {
+        if (k === "loan") s.borrowed += t.amount;
+        else if (k !== "transfer") s.earned += t.amount;
+      } else if (t.page === "Interest" && t.amount > 0 && k !== "transfer") {
+        s.interest += t.amount;
+      } else if (t.page === "Expense" && t.amount < 0) {
+        if (k === "loanpay" || k === "creditpay") s.debt += -t.amount;
+        else {
+          s.spent += -t.amount;
+          s.byCat[t.category] = (s.byCat[t.category] || 0) + -t.amount;
+        }
+      }
+    });
+    ["earned", "interest", "spent", "debt", "borrowed"].forEach((k) => s[k] = round2(s[k]));
+    return s;
+  }
+  function bucketPlan(key, from) {
+    const f = parseISO(from);
+    if (key === "week") return {
+      count: 7,
+      index: (d) => daysBetween(from, d),
+      label: (i) => DAYN[parseISO(addDaysISO(from, i)).getDay()],
+      start: (i) => addDaysISO(from, i),
+      end: (i) => addDaysISO(from, i)
+    };
+    if (key === "year") {
+      const y = f.getFullYear();
+      return {
+        count: 12,
+        index: (d) => parseISO(d).getMonth(),
+        label: (i) => MON[i],
+        start: (i) => isoDate(new Date(y, i, 1)),
+        end: (i) => isoDate(new Date(y, i, daysInMonth(y, i)))
+      };
+    }
+    const dim = daysInMonth(f.getFullYear(), f.getMonth());
+    return {
+      count: Math.ceil(dim / 7),
+      index: (d) => Math.floor((parseISO(d).getDate() - 1) / 7),
+      label: (i) => "W" + (i + 1),
+      start: (i) => addDaysISO(from, i * 7),
+      end: (i) => addDaysISO(from, Math.min(i * 7 + 6, dim - 1))
+    };
+  }
+  function analyze(accId, rangeKey, today) {
+    today = today || todayISO();
+    const mine = STATE.transactions.filter((t) => accId === "overall" || t.accountId === accId);
+    if (!RANGES.some((r) => r.key === rangeKey)) rangeKey = "month";
+    const { from, to, days } = rangeBounds(rangeKey, today);
+    const inRange = mine.filter((t) => t.date >= from && t.date <= to);
+    const cur = sums(inRange);
+    const pb = prevBounds(rangeKey, from);
+    const prev = sums(mine.filter((t) => t.date >= pb.from && t.date <= pb.to));
+    const income = round2(cur.earned + cur.interest);
+    const net = round2(income - cur.spent);
+    const out = {
+      from,
+      to,
+      days,
+      cur,
+      prev,
+      income,
+      net,
+      savingsRate: income > 0 ? net / income : null,
+      avgIncomeDaily: round2(income / days),
+      avgDaily: round2(cur.spent / days),
+      prevAvgDaily: round2(prev.spent / pb.days),
+      spentChange: prev.spent > 0 ? (cur.spent / days - prev.spent / pb.days) / (prev.spent / pb.days) : null,
+      empty: !inRange.length
+    };
+    const plan = bucketPlan(rangeKey, from);
+    const buckets = Array.from({ length: plan.count }, (_, i) => ({ label: plan.label(i), income: 0, spent: 0, start: plan.start(i), end: plan.end(i) }));
+    inRange.forEach((t) => {
+      const i = plan.index(t.date);
+      if (i < 0 || i >= buckets.length) return;
+      const k = txKind(t);
+      if (t.page === "Expense" && t.amount < 0 && k !== "loanpay" && k !== "creditpay") buckets[i].spent += -t.amount;
+      else if (t.amount > 0 && (t.page === "Income" && k !== "loan" && k !== "transfer" || t.page === "Interest" && k !== "transfer")) buckets[i].income += t.amount;
+    });
+    buckets.forEach((b) => {
+      b.income = round2(b.income);
+      b.spent = round2(b.spent);
+    });
+    out.buckets = buckets;
+    const asset = mine.filter((t) => t.page !== "Expense").sort((a, b) => a.date.localeCompare(b.date));
+    let run = 0, ai = 0;
+    while (ai < asset.length && asset[ai].date < from) {
+      run += asset[ai].amount;
+      ai++;
+    }
+    out.startHeld = round2(run);
+    out.trend = buckets.filter((b) => b.start <= today).map((b) => {
+      while (ai < asset.length && asset[ai].date <= b.end) {
+        run += asset[ai].amount;
+        ai++;
+      }
+      return { label: b.label, value: round2(run) };
+    });
+    const cats = Object.entries(cur.byCat).sort((a, b) => b[1] - a[1]);
+    const total = cur.spent;
+    const top = cats.slice(0, 6).map(([name, value]) => ({ name, value: round2(value), pct: total ? value / total : 0 }));
+    const rest = cats.slice(6).reduce((s, [, v]) => s + v, 0);
+    if (rest > 0) top.push({ name: "Other", value: round2(rest), pct: total ? rest / total : 0 });
+    out.categories = top;
+    const ym = today.slice(0, 7);
+    out.budgets = STATE.budgets.filter((g) => g.kind === "expense").map((g) => {
+      const spent = spentThisMonth(accId, g.category, ym);
+      return { category: g.category, spent, limit: g.limit, pct: g.limit ? spent / g.limit : 0 };
+    });
+    out.goals = STATE.budgets.filter((g) => g.kind === "savings").map((g) => {
+      const bal = balFor(accId, "Savings", g.category);
+      return { category: g.category, balance: bal, goal: g.goalAmount, pct: g.goalAmount ? bal / g.goalAmount : 0 };
+    });
+    out.owed = liabilities(accId);
+    out.held = round2(out.trend.length ? out.trend[out.trend.length - 1].value : 0);
+    const ins = [];
+    if (out.spentChange !== null && Math.abs(out.spentChange) >= 0.05) {
+      const up = out.spentChange > 0;
+      ins.push({ tone: up ? "warn" : "good", text: "Daily spending is ".concat(up ? "up" : "down", " ").concat(Math.round(Math.abs(out.spentChange) * 100), "% compared with the previous ").concat(rangeKey, ".") });
+    }
+    if (top.length && top[0].name !== "Other" && total > 0)
+      ins.push({ tone: "info", text: "".concat(top[0].name, " is your biggest expense: ").concat(Math.round(top[0].pct * 100), "% of spending (").concat(fmt(top[0].value), ").") });
+    if (out.savingsRate !== null) {
+      if (out.net < 0) ins.push({ tone: "warn", text: "You spent ".concat(fmt(-out.net), " more than you earned in this period.") });
+      else if (out.savingsRate >= 0.2) ins.push({ tone: "good", text: "You kept ".concat(Math.round(out.savingsRate * 100), "% of what you earned. Nice.") });
+    } else if (cur.spent > 0) {
+      ins.push({ tone: "info", text: "No income was recorded in this period, so there is no savings rate to show." });
+    }
+    out.budgets.forEach((b) => {
+      if (b.pct >= 1) ins.push({ tone: "warn", text: "".concat(b.category, " is over its monthly limit by ").concat(fmt(b.spent - b.limit), ".") });
+      else if (b.pct >= 0.8) ins.push({ tone: "warn", text: "".concat(b.category, " has used ").concat(Math.round(b.pct * 100), "% of its monthly limit.") });
+    });
+    if (rangeKey === "month" && cur.spent > 0) {
+      const dom = parseISO(today).getDate(), dim = daysInMonth(parseISO(today).getFullYear(), parseISO(today).getMonth());
+      if (dom < dim) ins.push({ tone: "info", text: "At this pace you will spend about ".concat(fmt(round2(cur.spent / dom * dim)), " this month.") });
+    }
+    if (out.owed > 0) ins.push({ tone: "info", text: "You currently owe ".concat(fmt(out.owed), " across loans and credit.") });
+    out.insights = ins;
+    return out;
+  }
+
+  // src/charts.js
+  var compact = (n) => {
+    const a = Math.abs(n);
+    const s = a >= 1e6 ? (a / 1e6).toFixed(1).replace(/\.0$/, "") + "M" : a >= 1e3 ? (a / 1e3).toFixed(1).replace(/\.0$/, "") + "k" : String(Math.round(a));
+    return (n < 0 ? "-" : "") + s;
+  };
+  function donut(slices, centerLabel) {
+    const r = 40, C2 = 2 * Math.PI * r;
+    let off = 0;
+    const total = slices.reduce((s, x) => s + x.value, 0);
+    const arcs = total > 0 ? slices.map((s, i) => {
+      const len = s.value / total * C2;
+      const el2 = '<circle cx="60" cy="60" r="'.concat(r, '" fill="none" stroke-width="16" style="stroke:').concat(CAT_COLORS[i % CAT_COLORS.length], '" stroke-dasharray="').concat(len.toFixed(2), " ").concat((C2 - len).toFixed(2), '" stroke-dashoffset="').concat((-off).toFixed(2), '" transform="rotate(-90 60 60)"><title>').concat(esc(s.name), ": ").concat(esc(fmt(s.value)), "</title></circle>");
+      off += len;
+      return el2;
+    }).join("") : '<circle cx="60" cy="60" r="'.concat(r, '" fill="none" stroke-width="16" style="stroke:var(--border)"/>');
+    return '<svg class="a-svg" viewBox="0 0 120 120" role="img" aria-label="Spending by category" style="max-width:150px;margin:0 auto">'.concat(arcs, '\n    <text x="60" y="58" text-anchor="middle" style="font-size:8px">Spent</text>\n    <text x="60" y="70" text-anchor="middle" style="font-size:10px;font-weight:700;fill:var(--text)">').concat(esc(centerLabel), "</text></svg>");
+  }
+  function legend(slices) {
+    return '<div class="a-legend">'.concat(slices.map((s, i) => '<div class="row-l"><i style="background:'.concat(CAT_COLORS[i % CAT_COLORS.length], '"></i><span class="nm">').concat(esc(s.name), '</span><span class="pc">').concat(Math.round(s.pct * 100), "% \xB7 ").concat(esc(fmt(s.value)), "</span></div>")).join(""), "</div>");
+  }
+  function groupedBars(buckets) {
+    const W = 300, H = 120, top = 8, bottom = 16, left = 4;
+    const max = Math.max(1, ...buckets.map((b) => Math.max(b.income, b.spent)));
+    const slot = (W - left) / Math.max(1, buckets.length);
+    const bw = Math.max(1.5, Math.min(14, slot / 2 - 1));
+    const ch = H - top - bottom;
+    const every = Math.ceil(buckets.length / 8);
+    let g = '<line x1="0" x2="'.concat(W, '" y1="').concat(H - bottom, '" y2="').concat(H - bottom, '" style="stroke:var(--border)"/>');
+    buckets.forEach((b, i) => {
+      const x = left + i * slot + slot / 2;
+      const hi = b.income / max * ch, hs = b.spent / max * ch;
+      if (b.income > 0) g += '<rect x="'.concat((x - bw).toFixed(1), '" y="').concat((H - bottom - hi).toFixed(1), '" width="').concat(bw.toFixed(1), '" height="').concat(hi.toFixed(1), '" rx="1" style="fill:var(--accent-2)"><title>').concat(esc(b.label), " income: ").concat(esc(fmt(b.income)), "</title></rect>");
+      if (b.spent > 0) g += '<rect x="'.concat(x.toFixed(1), '" y="').concat((H - bottom - hs).toFixed(1), '" width="').concat(bw.toFixed(1), '" height="').concat(hs.toFixed(1), '" rx="1" style="fill:var(--danger)"><title>').concat(esc(b.label), " spent: ").concat(esc(fmt(b.spent)), "</title></rect>");
+      if (i % every === 0) g += '<text x="'.concat(x.toFixed(1), '" y="').concat(H - 4, '" text-anchor="middle">').concat(esc(b.label), "</text>");
+    });
+    g += '<text x="'.concat(left, '" y="').concat(top, '" >').concat(esc(compact(max)), "</text>");
+    return '<svg class="a-svg" viewBox="0 0 '.concat(W, " ").concat(H, '" role="img" aria-label="Income versus spending">').concat(g, '</svg>\n    <div class="a-key"><span><i style="background:var(--accent-2)"></i>Income</span><span><i style="background:var(--danger)"></i>Spent</span></div>');
+  }
+  function line(points, startValue) {
+    const W = 300, H = 90, pad = 6;
+    if (points.length < 2) return '<div class="a-empty">Not enough data for a trend yet.</div>';
+    const vals = points.map((p) => p.value).concat([startValue]);
+    const max = Math.max(...vals), min = Math.min(...vals);
+    const range2 = max - min || 1;
+    const step = (W - pad * 2) / (points.length - 1);
+    const y = (v) => H - 14 - (v - min) / range2 * (H - 28);
+    const pts = points.map((p, i) => [pad + i * step, y(p.value)]);
+    const d = pts.map((p, i) => "".concat(i ? "L" : "M").concat(p[0].toFixed(1), ",").concat(p[1].toFixed(1))).join(" ");
+    const area = "".concat(d, " L").concat(pts[pts.length - 1][0].toFixed(1), ",").concat(H - 14, " L").concat(pts[0][0].toFixed(1), ",").concat(H - 14, " Z");
+    const every = Math.ceil(points.length / 6);
+    const labels = points.map((p, i) => i % every === 0 ? '<text x="'.concat(pts[i][0].toFixed(1), '" y="').concat(H - 2, '" text-anchor="middle">').concat(esc(p.label), "</text>") : "").join("");
+    const dots = points.length <= 40 ? pts.map((p, i) => '<circle cx="'.concat(p[0].toFixed(1), '" cy="').concat(p[1].toFixed(1), '" r="2" style="fill:var(--accent-1)"><title>').concat(esc(points[i].label), ": ").concat(esc(fmt(points[i].value)), "</title></circle>")).join("") : "";
+    return '<svg class="a-svg" viewBox="0 0 '.concat(W, " ").concat(H, '" role="img" aria-label="Money held over time">\n    <path d="').concat(area, '" style="fill:var(--accent-1);opacity:.12"/><path d="').concat(d, '" fill="none" stroke-width="2" style="stroke:var(--accent-1)"/>').concat(dots, '\n    <text x="').concat(pad, '" y="9">').concat(esc(compact(max)), '</text><text x="').concat(W - pad, '" y="9" text-anchor="end">').concat(esc(fmt(points[points.length - 1].value)), "</text>").concat(labels, "</svg>");
+  }
+  function hbar(name, value, limit, pct2, danger) {
+    const w = Math.max(0, Math.min(100, pct2 * 100));
+    return '<div class="hbar"><div class="hbar-top"><span class="nm">'.concat(esc(name), '</span><span class="').concat(danger ? "neg" : "", '">').concat(esc(fmt(value)), " / ").concat(esc(fmt(limit)), '</span></div>\n    <div class="hbar-track"><div class="hbar-fill" style="width:').concat(w.toFixed(0), "%;background:").concat(danger ? "var(--danger)" : "var(--accent-2)", '"></div></div></div>');
+  }
+
+  // src/widgets/analysis.js
+  var range = "month";
+  var card = (title, inner) => '<div class="a-card"><h4>'.concat(esc(title), "</h4>").concat(inner, "</div>");
+  var tile = (lbl, val, cls) => '<div class="a-tile"><div class="lbl">'.concat(esc(lbl), '</div><div class="val ').concat(cls || "", '">').concat(val, "</div></div>");
+  var pct = (n) => Math.round(Math.abs(n) * 100) + "%";
+  function renderAnalysis() {
+    const box = el("div", "analysis-section");
+    const chips = el("div", "a-range");
+    RANGES.forEach((r) => {
+      const b = el("button", r.key === range ? "active" : "", r.label);
+      b.setAttribute("aria-pressed", r.key === range ? "true" : "false");
+      b.addEventListener("click", () => {
+        range = r.key;
+        bus.render();
+      });
+      chips.appendChild(b);
+    });
+    box.appendChild(chips);
+    const a = analyze(STATE.activeAccountId, range);
+    if (a.empty && !a.budgets.length && !a.goals.length) {
+      box.appendChild(el("div", "a-empty", "No transactions in this period yet. Add some and your charts will show up here."));
+      return box;
+    }
+    const change = a.spentChange === null ? "" : '<div class="muted" style="font-size:10px">'.concat(a.spentChange > 0 ? "\u25B2" : "\u25BC", " ").concat(pct(a.spentChange), " vs previous ").concat(esc(range), "</div>");
+    const tiles = el("div", "a-tiles", [
+      tile("Income per day", fmt(a.avgIncomeDaily) + '<div class="muted" style="font-size:10px">'.concat(esc(fmt(a.income)), " total</div>"), "pos"),
+      tile("Spent per day", fmt(a.avgDaily) + '<div class="muted" style="font-size:10px">'.concat(esc(fmt(a.cur.spent)), " total</div>") + change, a.cur.spent > 0 ? "neg" : ""),
+      tile("Net", fmt(a.net), a.net >= 0 ? "pos" : "neg"),
+      tile("Savings rate", a.savingsRate === null ? "\u2014" : Math.round(a.savingsRate * 100) + "%", a.savingsRate !== null && a.savingsRate < 0 ? "neg" : ""),
+      tile("Interest earned", fmt(a.cur.interest))
+    ].join(""));
+    box.appendChild(tiles);
+    if (a.insights.length) {
+      const ul = el("div", "a-card");
+      ul.innerHTML = "<h4>Insights</h4>" + a.insights.map((i) => '<div style="font-size:12px;margin-bottom:6px;display:flex;gap:6px"><span class="material-icons-outlined" style="font-size:16px;color:'.concat(i.tone === "warn" ? "var(--danger)" : i.tone === "good" ? "var(--accent-2)" : "var(--text-dim)", '">').concat(i.tone === "warn" ? "warning_amber" : i.tone === "good" ? "trending_up" : "info", "</span><span>").concat(esc(i.text), "</span></div>")).join("");
+      box.appendChild(ul);
+    }
+    box.appendChild(el("div", "", card(range === "week" ? "Income vs spending, by day" : range === "month" ? "Income vs spending, by week" : "Income vs spending, by month", groupedBars(a.buckets))));
+    if (a.categories.length) box.appendChild(el("div", "", card("Where your money went", donut(a.categories, fmt(a.cur.spent)) + legend(a.categories))));
+    box.appendChild(el("div", "", card("Money held over time", line(a.trend, a.startHeld))));
+    if (a.budgets.length) box.appendChild(el("div", "", card("Monthly budgets", a.budgets.map((b) => hbar(b.category, b.spent, b.limit, b.pct, b.pct >= 1)).join(""))));
+    if (a.goals.length) box.appendChild(el("div", "", card("Savings goals", a.goals.map((g) => hbar(g.category, g.balance, g.goal, g.pct, false)).join(""))));
+    if (a.cur.debt > 0 || a.cur.borrowed > 0 || a.owed > 0)
+      box.appendChild(el("div", "", card("Debt", '<div style="font-size:12px;line-height:1.7">Borrowed this period: '.concat(esc(fmt(a.cur.borrowed)), "<br>Paid toward loans &amp; credit: ").concat(esc(fmt(a.cur.debt)), "<br>Still owed: ").concat(esc(fmt(a.owed)), "</div>"))));
+    return box;
+  }
+
   // src/pages/home.js
-  var filter = "Income";
+  var filter = "All";
   function renderHome() {
     const wrap = el("div");
     const accId = STATE.activeAccountId;
@@ -1102,30 +1384,33 @@
     const hero = el("div", "balance-hero");
     hero.innerHTML = '<div class="muted">'.concat(isOverall() ? "Overall Account" : esc((activeAccount() || {}).name || ""), ' \u2014 Net Balance</div>\n    <div class="amount">').concat(fmt(assets - owed), '</div>\n    <div class="muted" style="margin-top:4px">').concat(owed > 0 ? "".concat(fmt(assets), " held, minus ").concat(fmt(owed), " owed (loans + credit)") : "No loans or credit owed", '</div>\n    <div class="totals-strip">').concat(PAGES.map((p, i) => '<span class="pill" style="border-color:'.concat(CAT_COLORS[i], ";color:").concat(CAT_COLORS[i], '">').concat(p, ": ").concat(fmt(pageTotal(accId, p)), "</span>")).join(""), "</div>");
     wrap.appendChild(hero);
-    const split = el("div", "split");
-    const allBox = el("div", "box");
-    allBox.innerHTML = '<div class="section-title">All Transactions</div>';
-    allBox.appendChild(txList(STATE.transactions.filter((t) => accId === "overall" || t.accountId === accId)));
-    split.appendChild(allBox);
-    const filtBox = el("div", "box");
-    filtBox.appendChild(el("div", "section-title", "Filtered by page"));
+    const box = el("div", "box");
+    const head = el("div", "tx-head");
+    head.appendChild(el("div", "section-title", "Transactions"));
     const sel = el("select");
-    sel.innerHTML = PAGES.map((p) => '<option value="'.concat(p, '">').concat(p, "</option>")).join("");
-    sel.value = filter;
-    filtBox.appendChild(sel);
+    sel.id = "home-filter";
+    sel.setAttribute("aria-label", "Filter transactions by page");
+    sel.innerHTML = ["All"].concat(PAGES).map((p) => '<option value="'.concat(p, '">').concat(p === "All" ? "All pages" : p, "</option>")).join("");
+    sel.value = PAGES.includes(filter) ? filter : "All";
+    head.appendChild(sel);
+    box.appendChild(head);
     const holder = el("div");
-    filtBox.appendChild(holder);
+    box.appendChild(holder);
     const refresh = () => {
       holder.innerHTML = "";
-      holder.appendChild(txList(STATE.transactions.filter((t) => t.page === sel.value && (accId === "overall" || t.accountId === accId)), { collapse: false }));
+      const items = STATE.transactions.filter((t) => (sel.value === "All" || t.page === sel.value) && (accId === "overall" || t.accountId === accId));
+      holder.appendChild(txList(items, { collapse: sel.value === "All" }));
     };
     sel.addEventListener("change", () => {
       filter = sel.value;
       refresh();
     });
     refresh();
-    split.appendChild(filtBox);
-    wrap.appendChild(split);
+    wrap.appendChild(box);
+    const an = el("div", "box analysis-box");
+    an.appendChild(el("div", "section-title", "Analysis"));
+    an.appendChild(renderAnalysis());
+    wrap.appendChild(an);
     return wrap;
   }
 
@@ -1908,303 +2193,6 @@
     return box;
   }
 
-  // src/analysis.js
-  var RANGES = [
-    { key: "7d", label: "7 days" },
-    { key: "30d", label: "30 days" },
-    { key: "month", label: "This month" },
-    { key: "90d", label: "90 days" },
-    { key: "year", label: "1 year" },
-    { key: "all", label: "All time" }
-  ];
-  var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  function rangeBounds(key, today, txs) {
-    const to = today;
-    let from;
-    switch (key) {
-      case "7d":
-        from = addDaysISO(today, -6);
-        break;
-      case "30d":
-        from = addDaysISO(today, -29);
-        break;
-      case "90d":
-        from = addDaysISO(today, -89);
-        break;
-      case "year":
-        from = addDaysISO(today, -364);
-        break;
-      case "month":
-        from = today.slice(0, 7) + "-01";
-        break;
-      default: {
-        const dates = txs.map((t) => t.date).sort();
-        from = dates.length && dates[0] < today ? dates[0] : today;
-      }
-    }
-    return { from, to, days: daysBetween(from, to) + 1 };
-  }
-  function sums(list) {
-    const s = { earned: 0, interest: 0, spent: 0, debt: 0, borrowed: 0, byCat: {} };
-    list.forEach((t) => {
-      const k = txKind(t);
-      if (t.page === "Income" && t.amount > 0) {
-        if (k === "loan") s.borrowed += t.amount;
-        else if (k !== "transfer") s.earned += t.amount;
-      } else if (t.page === "Interest" && t.amount > 0 && k !== "transfer") {
-        s.interest += t.amount;
-      } else if (t.page === "Expense" && t.amount < 0) {
-        if (k === "loanpay" || k === "creditpay") s.debt += -t.amount;
-        else {
-          s.spent += -t.amount;
-          s.byCat[t.category] = (s.byCat[t.category] || 0) + -t.amount;
-        }
-      }
-    });
-    ["earned", "interest", "spent", "debt", "borrowed"].forEach((k) => s[k] = round2(s[k]));
-    return s;
-  }
-  function bucketPlan(from, to, days) {
-    if (days <= 31) return { unit: "day", count: days, index: (d) => daysBetween(from, d), label: (i) => String(parseISO(addDaysISO(from, i)).getDate()), end: (i) => addDaysISO(from, i) };
-    if (days <= 140) {
-      const count2 = Math.ceil(days / 7);
-      return {
-        unit: "week",
-        count: count2,
-        index: (d) => Math.floor(daysBetween(from, d) / 7),
-        label: (i) => {
-          const d = parseISO(addDaysISO(from, i * 7));
-          return "".concat(d.getMonth() + 1, "/").concat(d.getDate());
-        },
-        end: (i) => addDaysISO(from, Math.min(i * 7 + 6, days - 1))
-      };
-    }
-    const f = parseISO(from), t = parseISO(to);
-    let count = (t.getFullYear() - f.getFullYear()) * 12 + (t.getMonth() - f.getMonth()) + 1;
-    const skip = Math.max(0, count - 24);
-    count -= skip;
-    const base = new Date(f.getFullYear(), f.getMonth() + skip, 1);
-    const keyOf = (i) => new Date(base.getFullYear(), base.getMonth() + i, 1);
-    return {
-      unit: "month",
-      count,
-      index: (d) => {
-        const x = parseISO(d);
-        return (x.getFullYear() - base.getFullYear()) * 12 + (x.getMonth() - base.getMonth());
-      },
-      label: (i) => MON[keyOf(i).getMonth()],
-      end: (i) => {
-        const k = keyOf(i);
-        return isoDate(new Date(k.getFullYear(), k.getMonth(), daysInMonth(k.getFullYear(), k.getMonth())));
-      }
-    };
-  }
-  function analyze(accId, rangeKey, today) {
-    today = today || todayISO();
-    const mine = STATE.transactions.filter((t) => accId === "overall" || t.accountId === accId);
-    const { from, to, days } = rangeBounds(rangeKey, today, mine);
-    const inRange = mine.filter((t) => t.date >= from && t.date <= to);
-    const cur = sums(inRange);
-    let prev = null;
-    if (rangeKey !== "all") {
-      const pTo = addDaysISO(from, -1), pFrom = addDaysISO(pTo, -(days - 1));
-      prev = sums(mine.filter((t) => t.date >= pFrom && t.date <= pTo));
-    }
-    const income = round2(cur.earned + cur.interest);
-    const net = round2(income - cur.spent);
-    const out = {
-      from,
-      to,
-      days,
-      cur,
-      prev,
-      income,
-      net,
-      savingsRate: income > 0 ? net / income : null,
-      avgDaily: round2(cur.spent / days),
-      spentChange: prev && prev.spent > 0 ? (cur.spent - prev.spent) / prev.spent : null,
-      empty: !inRange.length
-    };
-    const plan = bucketPlan(from, to, days);
-    const buckets = Array.from({ length: plan.count }, (_, i) => ({ label: plan.label(i), income: 0, spent: 0, end: plan.end(i) }));
-    inRange.forEach((t) => {
-      const i = plan.index(t.date);
-      if (i < 0 || i >= buckets.length) return;
-      const k = txKind(t);
-      if (t.page === "Expense" && t.amount < 0 && k !== "loanpay" && k !== "creditpay") buckets[i].spent += -t.amount;
-      else if (t.amount > 0 && (t.page === "Income" && k !== "loan" && k !== "transfer" || t.page === "Interest" && k !== "transfer")) buckets[i].income += t.amount;
-    });
-    buckets.forEach((b) => {
-      b.income = round2(b.income);
-      b.spent = round2(b.spent);
-    });
-    out.buckets = buckets;
-    out.unit = plan.unit;
-    const asset = mine.filter((t) => t.page !== "Expense").sort((a, b) => a.date.localeCompare(b.date));
-    let run = 0, ai = 0;
-    while (ai < asset.length && asset[ai].date < from) {
-      run += asset[ai].amount;
-      ai++;
-    }
-    out.startHeld = round2(run);
-    out.trend = buckets.map((b) => {
-      while (ai < asset.length && asset[ai].date <= b.end) {
-        run += asset[ai].amount;
-        ai++;
-      }
-      return { label: b.label, value: round2(run) };
-    });
-    const cats = Object.entries(cur.byCat).sort((a, b) => b[1] - a[1]);
-    const total = cur.spent;
-    const top = cats.slice(0, 6).map(([name, value]) => ({ name, value: round2(value), pct: total ? value / total : 0 }));
-    const rest = cats.slice(6).reduce((s, [, v]) => s + v, 0);
-    if (rest > 0) top.push({ name: "Other", value: round2(rest), pct: total ? rest / total : 0 });
-    out.categories = top;
-    const ym = today.slice(0, 7);
-    out.budgets = STATE.budgets.filter((g) => g.kind === "expense").map((g) => {
-      const spent = spentThisMonth(accId, g.category, ym);
-      return { category: g.category, spent, limit: g.limit, pct: g.limit ? spent / g.limit : 0 };
-    });
-    out.goals = STATE.budgets.filter((g) => g.kind === "savings").map((g) => {
-      const bal = balFor(accId, "Savings", g.category);
-      return { category: g.category, balance: bal, goal: g.goalAmount, pct: g.goalAmount ? bal / g.goalAmount : 0 };
-    });
-    out.owed = liabilities(accId);
-    out.held = round2(out.trend.length ? out.trend[out.trend.length - 1].value : 0);
-    const ins = [];
-    if (out.spentChange !== null && Math.abs(out.spentChange) >= 0.05) {
-      const up = out.spentChange > 0;
-      ins.push({ tone: up ? "warn" : "good", text: "Spending is ".concat(up ? "up" : "down", " ").concat(Math.round(Math.abs(out.spentChange) * 100), "% compared with the previous ").concat(days, " day").concat(days === 1 ? "" : "s", ".") });
-    }
-    if (top.length && top[0].name !== "Other" && total > 0)
-      ins.push({ tone: "info", text: "".concat(top[0].name, " is your biggest expense: ").concat(Math.round(top[0].pct * 100), "% of spending (").concat(fmt(top[0].value), ").") });
-    if (out.savingsRate !== null) {
-      if (out.net < 0) ins.push({ tone: "warn", text: "You spent ".concat(fmt(-out.net), " more than you earned in this period.") });
-      else if (out.savingsRate >= 0.2) ins.push({ tone: "good", text: "You kept ".concat(Math.round(out.savingsRate * 100), "% of what you earned. Nice.") });
-    } else if (cur.spent > 0) {
-      ins.push({ tone: "info", text: "No income was recorded in this period, so there is no savings rate to show." });
-    }
-    out.budgets.forEach((b) => {
-      if (b.pct >= 1) ins.push({ tone: "warn", text: "".concat(b.category, " is over its monthly limit by ").concat(fmt(b.spent - b.limit), ".") });
-      else if (b.pct >= 0.8) ins.push({ tone: "warn", text: "".concat(b.category, " has used ").concat(Math.round(b.pct * 100), "% of its monthly limit.") });
-    });
-    if (rangeKey === "month" && cur.spent > 0) {
-      const dom = parseISO(today).getDate(), dim = daysInMonth(parseISO(today).getFullYear(), parseISO(today).getMonth());
-      if (dom < dim) ins.push({ tone: "info", text: "At this pace you will spend about ".concat(fmt(round2(cur.spent / dom * dim)), " this month.") });
-    }
-    if (out.owed > 0) ins.push({ tone: "info", text: "You currently owe ".concat(fmt(out.owed), " across loans and credit.") });
-    out.insights = ins;
-    return out;
-  }
-
-  // src/charts.js
-  var compact = (n) => {
-    const a = Math.abs(n);
-    const s = a >= 1e6 ? (a / 1e6).toFixed(1).replace(/\.0$/, "") + "M" : a >= 1e3 ? (a / 1e3).toFixed(1).replace(/\.0$/, "") + "k" : String(Math.round(a));
-    return (n < 0 ? "-" : "") + s;
-  };
-  function donut(slices, centerLabel) {
-    const r = 40, C2 = 2 * Math.PI * r;
-    let off = 0;
-    const total = slices.reduce((s, x) => s + x.value, 0);
-    const arcs = total > 0 ? slices.map((s, i) => {
-      const len = s.value / total * C2;
-      const el2 = '<circle cx="60" cy="60" r="'.concat(r, '" fill="none" stroke-width="16" style="stroke:').concat(CAT_COLORS[i % CAT_COLORS.length], '" stroke-dasharray="').concat(len.toFixed(2), " ").concat((C2 - len).toFixed(2), '" stroke-dashoffset="').concat((-off).toFixed(2), '" transform="rotate(-90 60 60)"><title>').concat(esc(s.name), ": ").concat(esc(fmt(s.value)), "</title></circle>");
-      off += len;
-      return el2;
-    }).join("") : '<circle cx="60" cy="60" r="'.concat(r, '" fill="none" stroke-width="16" style="stroke:var(--border)"/>');
-    return '<svg class="a-svg" viewBox="0 0 120 120" role="img" aria-label="Spending by category" style="max-width:150px;margin:0 auto">'.concat(arcs, '\n    <text x="60" y="58" text-anchor="middle" style="font-size:8px">Spent</text>\n    <text x="60" y="70" text-anchor="middle" style="font-size:10px;font-weight:700;fill:var(--text)">').concat(esc(centerLabel), "</text></svg>");
-  }
-  function legend(slices) {
-    return '<div class="a-legend">'.concat(slices.map((s, i) => '<div class="row-l"><i style="background:'.concat(CAT_COLORS[i % CAT_COLORS.length], '"></i><span class="nm">').concat(esc(s.name), '</span><span class="pc">').concat(Math.round(s.pct * 100), "% \xB7 ").concat(esc(fmt(s.value)), "</span></div>")).join(""), "</div>");
-  }
-  function groupedBars(buckets) {
-    const W = 300, H = 120, top = 8, bottom = 16, left = 4;
-    const max = Math.max(1, ...buckets.map((b) => Math.max(b.income, b.spent)));
-    const slot = (W - left) / Math.max(1, buckets.length);
-    const bw = Math.max(1.5, Math.min(14, slot / 2 - 1));
-    const ch = H - top - bottom;
-    const every = Math.ceil(buckets.length / 8);
-    let g = '<line x1="0" x2="'.concat(W, '" y1="').concat(H - bottom, '" y2="').concat(H - bottom, '" style="stroke:var(--border)"/>');
-    buckets.forEach((b, i) => {
-      const x = left + i * slot + slot / 2;
-      const hi = b.income / max * ch, hs = b.spent / max * ch;
-      if (b.income > 0) g += '<rect x="'.concat((x - bw).toFixed(1), '" y="').concat((H - bottom - hi).toFixed(1), '" width="').concat(bw.toFixed(1), '" height="').concat(hi.toFixed(1), '" rx="1" style="fill:var(--accent-2)"><title>').concat(esc(b.label), " income: ").concat(esc(fmt(b.income)), "</title></rect>");
-      if (b.spent > 0) g += '<rect x="'.concat(x.toFixed(1), '" y="').concat((H - bottom - hs).toFixed(1), '" width="').concat(bw.toFixed(1), '" height="').concat(hs.toFixed(1), '" rx="1" style="fill:var(--danger)"><title>').concat(esc(b.label), " spent: ").concat(esc(fmt(b.spent)), "</title></rect>");
-      if (i % every === 0) g += '<text x="'.concat(x.toFixed(1), '" y="').concat(H - 4, '" text-anchor="middle">').concat(esc(b.label), "</text>");
-    });
-    g += '<text x="'.concat(left, '" y="').concat(top, '" >').concat(esc(compact(max)), "</text>");
-    return '<svg class="a-svg" viewBox="0 0 '.concat(W, " ").concat(H, '" role="img" aria-label="Income versus spending">').concat(g, '</svg>\n    <div class="a-key"><span><i style="background:var(--accent-2)"></i>Income</span><span><i style="background:var(--danger)"></i>Spent</span></div>');
-  }
-  function line(points, startValue) {
-    const W = 300, H = 90, pad = 6;
-    if (points.length < 2) return '<div class="a-empty">Not enough data for a trend yet.</div>';
-    const vals = points.map((p) => p.value).concat([startValue]);
-    const max = Math.max(...vals), min = Math.min(...vals);
-    const range2 = max - min || 1;
-    const step = (W - pad * 2) / (points.length - 1);
-    const y = (v) => H - 14 - (v - min) / range2 * (H - 28);
-    const pts = points.map((p, i) => [pad + i * step, y(p.value)]);
-    const d = pts.map((p, i) => "".concat(i ? "L" : "M").concat(p[0].toFixed(1), ",").concat(p[1].toFixed(1))).join(" ");
-    const area = "".concat(d, " L").concat(pts[pts.length - 1][0].toFixed(1), ",").concat(H - 14, " L").concat(pts[0][0].toFixed(1), ",").concat(H - 14, " Z");
-    const every = Math.ceil(points.length / 6);
-    const labels = points.map((p, i) => i % every === 0 ? '<text x="'.concat(pts[i][0].toFixed(1), '" y="').concat(H - 2, '" text-anchor="middle">').concat(esc(p.label), "</text>") : "").join("");
-    const dots = points.length <= 40 ? pts.map((p, i) => '<circle cx="'.concat(p[0].toFixed(1), '" cy="').concat(p[1].toFixed(1), '" r="2" style="fill:var(--accent-1)"><title>').concat(esc(points[i].label), ": ").concat(esc(fmt(points[i].value)), "</title></circle>")).join("") : "";
-    return '<svg class="a-svg" viewBox="0 0 '.concat(W, " ").concat(H, '" role="img" aria-label="Money held over time">\n    <path d="').concat(area, '" style="fill:var(--accent-1);opacity:.12"/><path d="').concat(d, '" fill="none" stroke-width="2" style="stroke:var(--accent-1)"/>').concat(dots, '\n    <text x="').concat(pad, '" y="9">').concat(esc(compact(max)), '</text><text x="').concat(W - pad, '" y="9" text-anchor="end">').concat(esc(fmt(points[points.length - 1].value)), "</text>").concat(labels, "</svg>");
-  }
-  function hbar(name, value, limit, pct2, danger) {
-    const w = Math.max(0, Math.min(100, pct2 * 100));
-    return '<div class="hbar"><div class="hbar-top"><span class="nm">'.concat(esc(name), '</span><span class="').concat(danger ? "neg" : "", '">').concat(esc(fmt(value)), " / ").concat(esc(fmt(limit)), '</span></div>\n    <div class="hbar-track"><div class="hbar-fill" style="width:').concat(w.toFixed(0), "%;background:").concat(danger ? "var(--danger)" : "var(--accent-2)", '"></div></div></div>');
-  }
-
-  // src/widgets/analysis.js
-  var range = "30d";
-  var card = (title, inner) => '<div class="a-card"><h4>'.concat(esc(title), "</h4>").concat(inner, "</div>");
-  var tile = (lbl, val, cls) => '<div class="a-tile"><div class="lbl">'.concat(esc(lbl), '</div><div class="val ').concat(cls || "", '">').concat(val, "</div></div>");
-  var pct = (n) => Math.round(Math.abs(n) * 100) + "%";
-  function renderAnalysis() {
-    const box = el("div");
-    const chips = el("div", "a-range");
-    RANGES.forEach((r) => {
-      const b = el("button", r.key === range ? "active" : "", r.label);
-      b.setAttribute("aria-pressed", r.key === range ? "true" : "false");
-      b.addEventListener("click", () => {
-        range = r.key;
-        bus.refreshWidget("Analysis");
-      });
-      chips.appendChild(b);
-    });
-    box.appendChild(chips);
-    const a = analyze(STATE.activeAccountId, range);
-    if (a.empty && !a.budgets.length && !a.goals.length) {
-      box.appendChild(el("div", "a-empty", "No transactions in this period yet. Add some and your charts will show up here."));
-      return box;
-    }
-    const change = a.spentChange === null ? "" : '<div class="muted" style="font-size:10px">'.concat(a.spentChange > 0 ? "\u25B2" : "\u25BC", " ").concat(pct(a.spentChange), " vs previous</div>");
-    const tiles = el("div", "a-tiles", [
-      tile("Income", fmt(a.income), "pos"),
-      tile("Spent", fmt(a.cur.spent) + change, a.cur.spent > 0 ? "neg" : ""),
-      tile("Net", fmt(a.net), a.net >= 0 ? "pos" : "neg"),
-      tile("Savings rate", a.savingsRate === null ? "\u2014" : Math.round(a.savingsRate * 100) + "%", a.savingsRate !== null && a.savingsRate < 0 ? "neg" : ""),
-      tile("Avg per day", fmt(a.avgDaily)),
-      tile("Interest earned", fmt(a.cur.interest))
-    ].join(""));
-    box.appendChild(tiles);
-    if (a.insights.length) {
-      const ul = el("div", "a-card");
-      ul.innerHTML = "<h4>Insights</h4>" + a.insights.map((i) => '<div style="font-size:12px;margin-bottom:6px;display:flex;gap:6px"><span class="material-icons-outlined" style="font-size:16px;color:'.concat(i.tone === "warn" ? "var(--danger)" : i.tone === "good" ? "var(--accent-2)" : "var(--text-dim)", '">').concat(i.tone === "warn" ? "warning_amber" : i.tone === "good" ? "trending_up" : "info", "</span><span>").concat(esc(i.text), "</span></div>")).join("");
-      box.appendChild(ul);
-    }
-    box.appendChild(el("div", "", card("Income vs spending", groupedBars(a.buckets))));
-    if (a.categories.length) box.appendChild(el("div", "", card("Where your money went", donut(a.categories, fmt(a.cur.spent)) + legend(a.categories))));
-    box.appendChild(el("div", "", card("Money held over time", line(a.trend, a.startHeld))));
-    if (a.budgets.length) box.appendChild(el("div", "", card("Monthly budgets", a.budgets.map((b) => hbar(b.category, b.spent, b.limit, b.pct, b.pct >= 1)).join(""))));
-    if (a.goals.length) box.appendChild(el("div", "", card("Savings goals", a.goals.map((g) => hbar(g.category, g.balance, g.goal, g.pct, false)).join(""))));
-    if (a.cur.debt > 0 || a.cur.borrowed > 0 || a.owed > 0)
-      box.appendChild(el("div", "", card("Debt", '<div style="font-size:12px;line-height:1.7">Borrowed this period: '.concat(esc(fmt(a.cur.borrowed)), "<br>Paid toward loans &amp; credit: ").concat(esc(fmt(a.cur.debt)), "<br>Still owed: ").concat(esc(fmt(a.owed)), "</div>"))));
-    return box;
-  }
-
   // src/widgets/budget.js
   function renderBudget() {
     const box = el("div");
@@ -2568,7 +2556,6 @@
   var client = null;
   var timer = null;
   var cloudReady = false;
-  var errShown = false;
   var auth = {
     enabled,
     user: null,
@@ -2617,19 +2604,100 @@
     if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Browser) window.Capacitor.Plugins.Browser.close().catch(() => {
     });
   }
-  async function upload() {
-    const { error } = await client.from("finsta_state").upsert({ user_id: auth.user.id, data: STATE, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+  var cloudAt = null;
+  var applying = false;
+  var conflictOpen = false;
+  var pulling = false;
+  var sync = auth.sync = { status: "idle", at: null, error: "" };
+  var setSync = (status, error) => {
+    sync.status = status;
+    sync.error = error || "";
+    if (status === "ok") sync.at = /* @__PURE__ */ new Date();
+    if (bus.refreshWidget) bus.refreshWidget("Settings");
+  };
+  async function upload(force) {
+    if (!force && cloudAt) {
+      const { data: cur, error: e0 } = await client.from("finsta_state").select("updated_at").eq("user_id", auth.user.id).maybeSingle();
+      if (e0) return e0;
+      if (cur && cur.updated_at && cur.updated_at !== cloudAt) return { conflict: true };
+    }
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const { error } = await client.from("finsta_state").upsert({ user_id: auth.user.id, data: STATE, updated_at: at });
+    if (!error) cloudAt = at;
     return error;
+  }
+  async function fetchCloud() {
+    const { data, error } = await client.from("finsta_state").select("data, updated_at").eq("user_id", auth.user.id).maybeSingle();
+    return { row: data, error };
+  }
+  function adopt(row) {
+    applying = true;
+    try {
+      setState(row.data);
+      cloudAt = row.updated_at;
+      save();
+    } finally {
+      applying = false;
+    }
+    applyAutoInterestRules();
+    ensureCreditReminders();
+    processRecurring();
+    applying = true;
+    try {
+      save();
+    } finally {
+      applying = false;
+    }
+    bus.render();
+    bus.refreshWidgets();
+  }
+  async function resolveConflict() {
+    if (conflictOpen) return;
+    conflictOpen = true;
+    try {
+      const { row, error } = await fetchCloud();
+      if (error || !row) {
+        setSync("error", error ? error.message : "cloud data missing");
+        return;
+      }
+      const res = await openModal({
+        title: "Newer data in your account",
+        message: "Another device (or the website) saved changes after this one last synced. Pick which copy to keep. The other copy is replaced.",
+        fields: [{ key: "choice", type: "select", default: "cloud", options: [{ value: "cloud", label: "Use the newer account data (recommended)" }, { value: "local", label: "Keep this device's data and overwrite the account" }] }],
+        confirmText: "Continue"
+      });
+      if (!res) {
+        setSync("error", "Sync paused: newer data in your account. Open Settings and tap Sync now.");
+        return;
+      }
+      if (res.choice === "local") {
+        const e = await upload(true);
+        if (e) {
+          setSync("error", e.message);
+          return;
+        }
+        setSync("ok");
+        toast("Uploaded this device's data.");
+      } else {
+        adopt(row);
+        setSync("ok");
+        toast("Loaded the newer data from your account.");
+      }
+    } finally {
+      conflictOpen = false;
+    }
   }
   async function loadCloud() {
     cloudReady = false;
-    const { data, error } = await client.from("finsta_state").select("data").eq("user_id", auth.user.id).maybeSingle();
+    setSync("syncing");
+    const { row: data, error } = await fetchCloud();
     if (error) {
+      setSync("error", error.message);
       toast("Could not load cloud data: " + error.message);
       return;
     }
     const guestUpgrade = !!localStorage.getItem("finsta_guest");
-    const hasLocal = STATE.transactions.length > 0, hasCloud = !!(data && data.data);
+    const hasLocal = STATE.transactions.length > 0 || STATE.loans.length > 0 || STATE.credits.length > 0, hasCloud = !!(data && data.data);
     if (hasCloud && hasLocal && guestUpgrade) {
       const res = await openModal({
         title: "Data found on this device and in your account",
@@ -2638,26 +2706,31 @@
         confirmText: "Continue"
       });
       if (!res) {
+        setSync("error", "Sync paused. Sign in again to choose which data to keep.");
         toast("Sync paused. Sign in again to choose which data to keep.");
         return;
       }
       if (res.choice === "local") {
-        const e = await upload();
+        cloudAt = data.updated_at;
+        const e = await upload(true);
         if (e) {
+          setSync("error", e.message);
           toast("Upload failed: " + e.message);
           return;
         }
-      } else setState(data.data);
-    } else if (hasCloud) setState(data.data);
+      } else adopt(data);
+    } else if (hasCloud) adopt(data);
     else {
-      const e = await upload();
+      const e = await upload(true);
       if (e) {
+        setSync("error", e.message);
         toast("Could not create cloud data: " + e.message);
         return;
       }
     }
     localStorage.removeItem("finsta_guest");
     cloudReady = true;
+    setSync("ok");
     applyAutoInterestRules();
     ensureCreditReminders();
     processRecurring();
@@ -2665,23 +2738,71 @@
     bus.render();
     bus.refreshWidgets();
   }
+  var lastToast = 0;
   function push() {
-    if (!enabled || !auth.user || !cloudReady) return;
+    if (!enabled || !auth.user || !cloudReady || applying) return;
     clearTimeout(timer);
+    setSync("syncing");
     timer = setTimeout(async () => {
       try {
         const e = await upload();
+        if (e && e.conflict) {
+          await resolveConflict();
+          return;
+        }
         if (e) throw e;
-        errShown = false;
+        setSync("ok");
       } catch (e) {
         console.warn("cloud sync failed", e);
-        if (!errShown) {
-          errShown = true;
-          toast("Cloud sync failed. Your data is safe on this device and will retry on the next change.");
+        setSync("error", e.message || String(e));
+        if (Date.now() - lastToast > 3e4) {
+          lastToast = Date.now();
+          toast("Cloud sync failed: " + (e.message || "network error") + ". Your data is safe on this device; it retries on the next change.");
         }
       }
     }, 600);
   }
+  async function pull() {
+    if (!enabled || !auth.user || !cloudReady || pulling || conflictOpen || timer && sync.status === "syncing") return;
+    pulling = true;
+    try {
+      const { row, error } = await fetchCloud();
+      if (error || !row || !row.updated_at) return;
+      if (cloudAt && row.updated_at !== cloudAt) {
+        adopt(row);
+        setSync("ok");
+        toast("Updated with the latest data from your account.");
+      }
+    } finally {
+      pulling = false;
+    }
+  }
+  auth.syncNow = async () => {
+    if (!enabled || !auth.user) {
+      toast("Sign in to sync.");
+      return;
+    }
+    clearTimeout(timer);
+    timer = null;
+    setSync("syncing");
+    try {
+      if (!cloudReady) {
+        await loadCloud();
+        return;
+      }
+      const e = await upload();
+      if (e && e.conflict) {
+        await resolveConflict();
+        return;
+      }
+      if (e) throw e;
+      setSync("ok");
+      toast("Synced.");
+    } catch (e) {
+      setSync("error", e.message || String(e));
+      toast("Sync failed: " + (e.message || "network error"));
+    }
+  };
   function gotUser(u) {
     if (auth.user && auth.user.id === u.id) return;
     auth.user = u;
@@ -2690,6 +2811,11 @@
   }
   function init() {
     onSave(push);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") pull();
+    });
+    window.addEventListener("focus", pull);
+    window.addEventListener("online", pull);
     if (!enabled) {
       auth.hideOverlay();
       return;
@@ -2762,7 +2888,13 @@
     if (auth.enabled) {
       const acct = el("div", "account-badge");
       if (auth.user) {
-        acct.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">cloud_done</span> Synced as '.concat(esc(auth.user.email || "Google account"), "</span>");
+        const st = auth.sync || { status: "idle" };
+        const stTxt = st.status === "error" ? "Sync problem: " + esc(st.error) : st.status === "syncing" ? "Syncing\u2026" : st.at ? "Last synced " + st.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Not synced yet";
+        acct.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">'.concat(st.status === "error" ? "cloud_off" : "cloud_done", "</span> ").concat(esc(auth.user.email || "Google account"), '<br><small class="muted">').concat(stTxt, "</small></span>");
+        const sn = el("button", "btn secondary", "Sync now");
+        sn.style.cssText = "padding:4px 10px;font-size:11px";
+        sn.addEventListener("click", () => auth.syncNow());
+        acct.appendChild(sn);
         const b = el("button", "btn secondary", "Sign out");
         b.style.cssText = "padding:4px 10px;font-size:11px";
         b.addEventListener("click", () => auth.signOut());
@@ -2848,7 +2980,6 @@
   // src/widgets/manager.js
   var WIDGET_DEFS = {
     Accounts: { icon: "badge", w: 300, h: 340, data: true, render: renderAccounts },
-    Analysis: { icon: "bar_chart", w: 320, h: 460, data: true, render: renderAnalysis },
     Budget: { icon: "track_changes", w: 300, h: 380, data: true, render: renderBudget },
     Calculator: { icon: "calculate", w: 280, h: 420, data: false, render: renderCalculator },
     Calendar: { icon: "calendar_month", w: 300, h: 400, data: true, render: renderCalendar },

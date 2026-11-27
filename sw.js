@@ -1,8 +1,9 @@
 /* FinSta service worker: precaches the whole app so it works fully offline. */
-const CACHE = "finsta-bb85353f";
+const CACHE = "finsta-a18d19ce";
 const ASSETS = [
  "./",
  ".nojekyll",
+ "DEPLOY.md",
  "app.bundle.js",
  "config.local.js",
  "extra.css",
