@@ -1,0 +1,105 @@
+/* =========================================================
+   FinSta — additional components (v2)
+   ========================================================= */
+
+/* ---------- Widgets as bottom sheets on phones ---------- */
+.sheet-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.4); pointer-events:auto; z-index:44; }
+.widget.sheet {
+  position:fixed; left:0; right:0; bottom:0; top:auto; transform:none;
+  width:100%; height:auto; max-height:80vh; min-width:0; min-height:0;
+  border-radius:16px 16px 0 0; box-shadow:0 -8px 30px rgba(0,0,0,0.3);
+  animation: sheetUp .18s ease-out;
+}
+@keyframes sheetUp { from{ transform:translateY(40px); opacity:0; } to{ transform:translateY(0); opacity:1; } }
+.widget.sheet .widget-titlebar { cursor:default; position:relative; padding-top:14px; }
+.widget.sheet .widget-titlebar::before {
+  content:""; position:absolute; top:5px; left:50%; width:36px; height:4px; margin-left:-18px;
+  border-radius:2px; background:var(--border);
+}
+.widget.sheet .widget-body { max-height:calc(80vh - 52px); padding-bottom:28px; }
+
+/* ---------- Accounts widget actions ---------- */
+.account-card .acc-actions { display:flex; align-items:center; gap:2px; margin-left:8px; }
+.account-card .acc-actions button { background:none; border:none; color:var(--text-dim); padding:4px; display:flex; }
+.account-card .acc-actions .material-icons-outlined { font-size:18px; }
+
+/* ---------- Analysis widget ---------- */
+.a-range { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+.a-range button {
+  padding:4px 10px; border-radius:999px; border:1px solid var(--border); background:none; color:var(--text-dim); font-size:11px;
+}
+.a-range button.active { border-color:var(--accent-1); color:var(--accent-1); font-weight:700; }
+.a-tiles { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+.a-tile { border:1px solid var(--border); border-radius:var(--radius); padding:8px 10px; min-width:0; }
+.a-tile .lbl { font-size:11px; color:var(--text-dim); }
+.a-tile .val { font-size:15px; font-weight:700; margin-top:2px; word-break:break-word; }
+.a-tile .val.pos { color:var(--accent-2); }
+.a-tile .val.neg { color:var(--danger); }
+.a-card { border:1px solid var(--border); border-radius:var(--radius); padding:10px; margin-bottom:12px; }
+.a-card h4 { margin:0 0 8px; font-size:12px; color:var(--text-dim); font-weight:600; font-family:var(--font-display); }
+.a-empty { text-align:center; color:var(--text-dim); font-size:12px; padding:16px 0; }
+.a-svg { width:100%; height:auto; display:block; overflow:visible; }
+.a-svg text { fill:var(--text-dim); font-size:9px; font-family:var(--font-body); }
+.a-legend { display:flex; flex-direction:column; gap:4px; margin-top:8px; font-size:11px; }
+.a-legend .row-l { display:flex; align-items:center; gap:6px; }
+.a-legend .row-l i { width:9px; height:9px; border-radius:2px; flex-shrink:0; display:inline-block; }
+.a-legend .row-l .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.a-legend .row-l .pc { color:var(--text-dim); }
+.a-key { display:flex; gap:12px; font-size:10px; color:var(--text-dim); margin-top:4px; }
+.a-key i { width:8px; height:8px; border-radius:2px; display:inline-block; margin-right:4px; }
+.hbar { margin-bottom:8px; font-size:11px; }
+.hbar-top { display:flex; justify-content:space-between; gap:8px; margin-bottom:2px; }
+.hbar-top .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hbar-track { height:7px; border-radius:4px; background:var(--bg); border:1px solid var(--border); overflow:hidden; }
+.hbar-fill { height:100%; }
+.hbar .neg { color:var(--danger); }
+
+/* ---------- Loan payments ---------- */
+.pay-history { margin-top:8px; border-top:1px dashed var(--border); padding-top:6px; font-size:12px; }
+.pay-history .pay-row { display:flex; justify-content:space-between; padding:2px 0; color:var(--text-dim); }
+.pay-btn { margin-top:8px; }
+
+/* ---------- Locked savings list ---------- */
+.lock-list { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+.lock-row { display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border:1px solid var(--border); border-radius:var(--radius); font-size:13px; }
+.lock-row label { display:flex; align-items:center; gap:8px; width:100%; justify-content:space-between; margin:0; }
+.lock-row input[type=checkbox] { width:auto; margin:0; }
+
+/* ---------- Recurring ---------- */
+.rec-row.paused { opacity:.55; }
+.chip-small { display:inline-block; font-size:10px; padding:1px 7px; border-radius:999px; border:1px solid var(--border); color:var(--text-dim); margin-left:6px; vertical-align:middle; }
+.credit-cycle { font-size:12px; color:var(--text-dim); margin-top:6px; }
+
+/* Sheet fixes: sit above the backdrop, and hide the dock button while a sheet is open */
+.widget.sheet { z-index: 46; }
+body.sheet-open .widget-dock-toggle { display:none; }
+
+/* ---------- Dropdown sections (categories, locks) ---------- */
+.dd-btn {
+  width:100%; display:flex; align-items:center; gap:8px; padding:10px 12px; background:none; color:var(--text);
+  border:1px solid var(--border); border-radius:var(--radius); font:inherit; font-weight:600; text-align:left;
+}
+.dd-btn > span:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dd-count { font-size:11px; color:var(--text-dim); font-weight:400; }
+.dd-arrow { font-size:20px; transition:transform .15s; }
+.dd.open .dd-arrow { transform:rotate(180deg); }
+.dd-panel { display:none; padding-top:8px; }
+.dd.open .dd-panel { display:block; }
+
+/* ---------- Instant / Scheduled switch ---------- */
+.seg { display:flex; gap:6px; margin-bottom:14px; padding:4px; border:1px solid var(--border); border-radius:999px; }
+.seg-btn { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:8px 10px; border:none; border-radius:999px; background:none; color:var(--text-dim); font:inherit; font-weight:600; }
+.seg-btn .material-icons-outlined { font-size:18px; }
+.seg-btn.active { background:var(--accent-1); color:var(--on-accent, #fff); }
+
+/* ---------- Contained scrolling: the page itself never scrolls or bounces; only the inner area does, with no bars ---------- */
+html, body { overflow:hidden; overscroll-behavior:none; }   /* html/body are already height:100% in style.css */
+.page-root { overscroll-behavior:contain; padding-bottom:calc(96px + env(safe-area-inset-bottom)); }
+.page-root::after { content:""; display:block; height:1px; }      /* end-of-content stop; nothing scrolls past it */
+.page-root, .widget-body, .tx-list, .app-modal-card, .page-nav, .widget-dock, .cal-grid {
+  overscroll-behavior:contain; scrollbar-width:none; -ms-overflow-style:none;
+}
+*::-webkit-scrollbar { width:0 !important; height:0 !important; display:none; }
+
+/* The sheet backdrop must never trap the top nav */
+.sheet-backdrop { top:64px; }
