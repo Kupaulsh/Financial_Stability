@@ -2545,8 +2545,8 @@
 
   // src/config.js
   var C = typeof window !== "undefined" && window.FINSTA_CONFIG || {};
-  var SUPABASE_URL = C.SUPABASE_URL || "";
-  var SUPABASE_ANON_KEY = C.SUPABASE_ANON_KEY || "";
+  var SUPABASE_URL = C.SUPABASE_URL || "https://weqcpxmqzqztztkticgk.supabase.co";
+  var SUPABASE_ANON_KEY = C.SUPABASE_ANON_KEY || "sb_publishable_Wgvv3mS-q8UnwOR2tL1UNg_4Uf5gsxj";
 
   // src/auth.js
   var enabled = SUPABASE_URL.startsWith("http") && !!SUPABASE_ANON_KEY;
@@ -2604,10 +2604,28 @@
     if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Browser) window.Capacitor.Plugins.Browser.close().catch(() => {
     });
   }
-  var cloudAt = null;
+  var K = { base: "finsta_cloud_base", local: "finsta_local_at", off: "finsta_sync_off", bak: "finsta_replaced_backup" };
+  var lget = (k) => {
+    try {
+      return localStorage.getItem(k);
+    } catch (e) {
+      return null;
+    }
+  };
+  var lset = (k, v) => {
+    try {
+      localStorage.setItem(k, v);
+    } catch (e) {
+    }
+  };
+  var num = (k) => Number(lget(k)) || 0;
+  var ms = (iso) => Date.parse(iso) || 0;
+  var autoSync = () => lget(K.off) !== "1";
+  var cloudAt = num(K.base);
   var applying = false;
-  var conflictOpen = false;
   var pulling = false;
+  var running = false;
+  var again = false;
   var sync = auth.sync = { status: "idle", at: null, error: "" };
   var setSync = (status, error) => {
     sync.status = status;
@@ -2615,164 +2633,185 @@
     if (status === "ok") sync.at = /* @__PURE__ */ new Date();
     if (bus.refreshWidget) bus.refreshWidget("Settings");
   };
-  async function upload(force) {
-    if (!force && cloudAt) {
-      const { data: cur, error: e0 } = await client.from("finsta_state").select("updated_at").eq("user_id", auth.user.id).maybeSingle();
-      if (e0) return e0;
-      if (cur && cur.updated_at && cur.updated_at !== cloudAt) return { conflict: true };
+  auth.autoSync = autoSync;
+  auth.hasBackup = () => !!lget(K.bak);
+  auth.restoreBackup = () => {
+    try {
+      const b = JSON.parse(lget(K.bak));
+      if (!b || !b.data) return false;
+      setState(b.data);
+      lset(K.local, String(Date.now()));
+      localStorage.removeItem(K.bak);
+      save();
+      bus.render();
+      bus.refreshWidgets();
+      return true;
+    } catch (e) {
+      return false;
     }
-    const at = (/* @__PURE__ */ new Date()).toISOString();
-    const { error } = await client.from("finsta_state").upsert({ user_id: auth.user.id, data: STATE, updated_at: at });
-    if (!error) cloudAt = at;
-    return error;
-  }
+  };
+  var backup = (from, data) => {
+    try {
+      lset(K.bak, JSON.stringify({ at: (/* @__PURE__ */ new Date()).toISOString(), from, data }));
+    } catch (e) {
+    }
+  };
   async function fetchCloud() {
     const { data, error } = await client.from("finsta_state").select("data, updated_at").eq("user_id", auth.user.id).maybeSingle();
     return { row: data, error };
+  }
+  async function upload() {
+    const at = /* @__PURE__ */ new Date();
+    const { error } = await client.from("finsta_state").upsert({ user_id: auth.user.id, data: STATE, updated_at: at.toISOString() });
+    if (error) return error;
+    let t = at.getTime();
+    try {
+      const r = await client.from("finsta_state").select("updated_at").eq("user_id", auth.user.id).maybeSingle();
+      if (r.data && r.data.updated_at) t = ms(r.data.updated_at);
+    } catch (e) {
+    }
+    cloudAt = t;
+    lset(K.base, String(t));
+    return null;
   }
   function adopt(row) {
     applying = true;
     try {
       setState(row.data);
-      cloudAt = row.updated_at;
+      applyAutoInterestRules();
+      ensureCreditReminders();
+      processRecurring();
       save();
     } finally {
       applying = false;
     }
-    applyAutoInterestRules();
-    ensureCreditReminders();
-    processRecurring();
-    applying = true;
-    try {
-      save();
-    } finally {
-      applying = false;
-    }
+    cloudAt = ms(row.updated_at);
+    lset(K.base, String(cloudAt));
     bus.render();
     bus.refreshWidgets();
   }
-  async function resolveConflict() {
-    if (conflictOpen) return;
-    conflictOpen = true;
-    try {
-      const { row, error } = await fetchCloud();
-      if (error || !row) {
-        setSync("error", error ? error.message : "cloud data missing");
-        return;
-      }
-      const res = await openModal({
-        title: "Newer data in your account",
-        message: "Another device (or the website) saved changes after this one last synced. Pick which copy to keep. The other copy is replaced.",
-        fields: [{ key: "choice", type: "select", default: "cloud", options: [{ value: "cloud", label: "Use the newer account data (recommended)" }, { value: "local", label: "Keep this device's data and overwrite the account" }] }],
-        confirmText: "Continue"
-      });
-      if (!res) {
-        setSync("error", "Sync paused: newer data in your account. Open Settings and tap Sync now.");
-        return;
-      }
-      if (res.choice === "local") {
-        const e = await upload(true);
-        if (e) {
-          setSync("error", e.message);
-          return;
-        }
-        setSync("ok");
-        toast("Uploaded this device's data.");
-      } else {
-        adopt(row);
-        setSync("ok");
-        toast("Loaded the newer data from your account.");
-      }
-    } finally {
-      conflictOpen = false;
+  function reconcile(row) {
+    const rowT = ms(row.updated_at), localT = num(K.local);
+    const cloudChanged = !cloudAt || Math.abs(rowT - cloudAt) > 1;
+    if (!cloudChanged) return localT > cloudAt;
+    if (localT > rowT) {
+      backup("cloud", row.data);
+      return true;
+    }
+    if (localT > cloudAt) backup("device", STATE);
+    adopt(row);
+    return false;
+  }
+  async function cycle() {
+    const { row, error } = await fetchCloud();
+    if (error) throw error;
+    if (!row || !row.data) {
+      const e = await upload();
+      if (e) throw e;
+      return;
+    }
+    if (reconcile(row)) {
+      const e = await upload();
+      if (e) throw e;
     }
   }
   async function loadCloud() {
     cloudReady = false;
-    setSync("syncing");
-    const { row: data, error } = await fetchCloud();
-    if (error) {
-      setSync("error", error.message);
-      toast("Could not load cloud data: " + error.message);
+    if (!autoSync()) {
+      setSync("off");
       return;
     }
-    const guestUpgrade = !!localStorage.getItem("finsta_guest");
-    const hasLocal = STATE.transactions.length > 0 || STATE.loans.length > 0 || STATE.credits.length > 0, hasCloud = !!(data && data.data);
-    if (hasCloud && hasLocal && guestUpgrade) {
-      const res = await openModal({
-        title: "Data found on this device and in your account",
-        message: "Which one should we keep? The other one will be replaced.",
-        fields: [{ key: "choice", type: "select", default: "cloud", options: [{ value: "cloud", label: "Use my account data" }, { value: "local", label: "Upload this device's data (replaces account data)" }] }],
-        confirmText: "Continue"
-      });
-      if (!res) {
-        setSync("error", "Sync paused. Sign in again to choose which data to keep.");
-        toast("Sync paused. Sign in again to choose which data to keep.");
-        return;
-      }
-      if (res.choice === "local") {
-        cloudAt = data.updated_at;
-        const e = await upload(true);
-        if (e) {
-          setSync("error", e.message);
-          toast("Upload failed: " + e.message);
+    setSync("syncing");
+    try {
+      const { row, error } = await fetchCloud();
+      if (error) throw error;
+      const hasLocal = STATE.transactions.length > 0 || STATE.loans.length > 0 || STATE.credits.length > 0;
+      if (row && row.data && hasLocal && lget("finsta_guest") && !cloudAt) {
+        const res = await openModal({
+          title: "Data found on this device and in your account",
+          message: "Which one should we keep? The other one is replaced (a copy is kept in Settings for restoring).",
+          fields: [{ key: "choice", type: "select", default: "local", options: [{ value: "local", label: "Keep this device's data" }, { value: "cloud", label: "Use my account data" }] }],
+          confirmText: "Continue"
+        });
+        if (!res) {
+          setSync("off");
           return;
         }
-      } else adopt(data);
-    } else if (hasCloud) adopt(data);
-    else {
-      const e = await upload(true);
-      if (e) {
-        setSync("error", e.message);
-        toast("Could not create cloud data: " + e.message);
-        return;
+        if (res.choice === "local") {
+          backup("cloud", row.data);
+          const e = await upload();
+          if (e) throw e;
+        } else {
+          backup("device", STATE);
+          adopt(row);
+        }
+      } else if (!row || !row.data) {
+        const e = await upload();
+        if (e) throw e;
+      } else if (reconcile(row)) {
+        const e = await upload();
+        if (e) throw e;
       }
+      localStorage.removeItem("finsta_guest");
+      cloudReady = true;
+      setSync("ok");
+      applyAutoInterestRules();
+      ensureCreditReminders();
+      processRecurring();
+      save();
+      bus.render();
+      bus.refreshWidgets();
+    } catch (e) {
+      console.warn("cloud load failed", e);
+      setSync("error", e.message || String(e));
     }
-    localStorage.removeItem("finsta_guest");
-    cloudReady = true;
-    setSync("ok");
-    applyAutoInterestRules();
-    ensureCreditReminders();
-    processRecurring();
-    save();
-    bus.render();
-    bus.refreshWidgets();
   }
-  var lastToast = 0;
   function push() {
-    if (!enabled || !auth.user || !cloudReady || applying) return;
+    if (!enabled || !auth.user || !cloudReady || applying || !autoSync()) return;
     clearTimeout(timer);
     setSync("syncing");
-    timer = setTimeout(async () => {
-      try {
+    timer = setTimeout(runCycle, 700);
+  }
+  async function runCycle() {
+    if (running) {
+      again = true;
+      return;
+    }
+    running = true;
+    try {
+      const { data: cur, error: e0 } = await client.from("finsta_state").select("updated_at").eq("user_id", auth.user.id).maybeSingle();
+      if (e0) throw e0;
+      if (cur && cur.updated_at && Math.abs(ms(cur.updated_at) - cloudAt) <= 1) {
         const e = await upload();
-        if (e && e.conflict) {
-          await resolveConflict();
-          return;
-        }
         if (e) throw e;
-        setSync("ok");
-      } catch (e) {
-        console.warn("cloud sync failed", e);
-        setSync("error", e.message || String(e));
-        if (Date.now() - lastToast > 3e4) {
-          lastToast = Date.now();
-          toast("Cloud sync failed: " + (e.message || "network error") + ". Your data is safe on this device; it retries on the next change.");
-        }
+      } else await cycle();
+      setSync("ok");
+    } catch (e) {
+      console.warn("cloud sync failed", e);
+      setSync("error", e.message || String(e));
+    } finally {
+      running = false;
+      if (again) {
+        again = false;
+        runCycle();
       }
-    }, 600);
+    }
   }
   async function pull() {
-    if (!enabled || !auth.user || !cloudReady || pulling || conflictOpen || timer && sync.status === "syncing") return;
+    if (!enabled || !auth.user || !cloudReady || !autoSync() || pulling || running) return;
     pulling = true;
     try {
       const { row, error } = await fetchCloud();
-      if (error || !row || !row.updated_at) return;
-      if (cloudAt && row.updated_at !== cloudAt) {
-        adopt(row);
+      if (error || !row || !row.data) return;
+      if (!cloudAt || Math.abs(ms(row.updated_at) - cloudAt) > 1) {
+        if (reconcile(row)) {
+          const e = await upload();
+          if (e) throw e;
+        }
         setSync("ok");
-        toast("Updated with the latest data from your account.");
       }
+    } catch (e) {
+      setSync("error", e.message || String(e));
     } finally {
       pulling = false;
     }
@@ -2782,25 +2821,37 @@
       toast("Sign in to sync.");
       return;
     }
+    if (!autoSync()) {
+      toast("Sync is switched off. Switch it on first.");
+      return;
+    }
     clearTimeout(timer);
     timer = null;
     setSync("syncing");
+    if (!cloudReady) {
+      await loadCloud();
+      if (cloudReady) toast("Synced.");
+      return;
+    }
     try {
-      if (!cloudReady) {
-        await loadCloud();
-        return;
-      }
-      const e = await upload();
-      if (e && e.conflict) {
-        await resolveConflict();
-        return;
-      }
-      if (e) throw e;
+      await cycle();
       setSync("ok");
       toast("Synced.");
     } catch (e) {
       setSync("error", e.message || String(e));
       toast("Sync failed: " + (e.message || "network error"));
+    }
+  };
+  auth.setAutoSync = async (on) => {
+    lset(K.off, on ? "0" : "1");
+    if (!on) {
+      clearTimeout(timer);
+      setSync("off");
+      return;
+    }
+    if (auth.user) {
+      cloudReady = false;
+      await loadCloud();
     }
   };
   function gotUser(u) {
@@ -2810,7 +2861,10 @@
     loadCloud();
   }
   function init() {
-    onSave(push);
+    onSave(() => {
+      if (!applying) lset(K.local, String(Date.now()));
+      push();
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") pull();
     });
@@ -2887,19 +2941,40 @@
     box.style.maxWidth = "480px";
     if (!auth.enabled) {
       const off = el("div", "account-badge");
-      off.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">cloud_off</span> Cloud sync is OFF in this build<br><small class="muted">Supabase isn\'t set up here, so data stays on this device only. Create <b>config.local.js</b> next to index.html (copy config.local.example.js) and rebuild.</small></span>';
+      off.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">cloud_off</span> Cloud sync is OFF in this build<br><small class="muted">Supabase isn\'t set up here, so data stays on this device only. Put your URL and anon key in src/config.js and rebuild.</small></span>';
       box.appendChild(off);
     }
     if (auth.enabled) {
       const acct = el("div", "account-badge");
       if (auth.user) {
         const st = auth.sync || { status: "idle" };
-        const stTxt = st.status === "error" ? "Sync problem: " + esc(st.error) : st.status === "syncing" ? "Syncing\u2026" : st.at ? "Last synced " + st.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Not synced yet";
-        acct.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">'.concat(st.status === "error" ? "cloud_off" : "cloud_done", "</span> ").concat(esc(auth.user.email || "Google account"), '<br><small class="muted">').concat(stTxt, "</small></span>");
-        const sn = el("button", "btn secondary", "Sync now");
-        sn.style.cssText = "padding:4px 10px;font-size:11px";
-        sn.addEventListener("click", () => auth.syncNow());
-        acct.appendChild(sn);
+        const on = auth.autoSync();
+        const stTxt = !on ? "Sync is off. Changes stay on this device." : st.status === "error" ? "Sync problem: " + esc(st.error) : st.status === "syncing" ? "Syncing\u2026" : st.at ? "Last synced " + st.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Not synced yet";
+        acct.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">'.concat(!on || st.status === "error" ? "cloud_off" : "cloud_done", "</span> ").concat(esc(auth.user.email || "Google account"), '<br><small class="muted">').concat(stTxt, "</small></span>");
+        const tg = el("button", "btn secondary", on ? "Don't sync" : "Sync");
+        tg.id = "sync-toggle";
+        tg.style.cssText = "padding:4px 10px;font-size:11px";
+        tg.addEventListener("click", async () => {
+          await auth.setAutoSync(!on);
+          bus.refreshWidget("Settings");
+        });
+        acct.appendChild(tg);
+        if (on) {
+          const sn = el("button", "btn secondary", "Sync now");
+          sn.style.cssText = "padding:4px 10px;font-size:11px";
+          sn.addEventListener("click", () => auth.syncNow());
+          acct.appendChild(sn);
+        }
+        if (auth.hasBackup()) {
+          const rb = el("button", "btn secondary", "Restore the copy replaced by sync");
+          rb.style.cssText = "padding:4px 10px;font-size:11px";
+          rb.addEventListener("click", () => confirmToast("Replace the current data with the copy that sync replaced?", () => {
+            auth.restoreBackup();
+            toast("Restored. Turn sync off first if you don't want it uploaded.");
+            bus.refreshWidget("Settings");
+          }));
+          acct.appendChild(rb);
+        }
         const b = el("button", "btn secondary", "Sign out");
         b.style.cssText = "padding:4px 10px;font-size:11px";
         b.addEventListener("click", () => auth.signOut());

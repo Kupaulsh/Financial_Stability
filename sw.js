@@ -1,12 +1,15 @@
 /* FinSta service worker: precaches the whole app so it works fully offline. */
-const CACHE = "finsta-b5e5b2ad";
+const CACHE = "finsta-0c612565";
 const ASSETS = [
  "./",
  ".nojekyll",
  "DEPLOY.md",
  "app.bundle.js",
- "config.local.example.js",
+ "app.js",
+ "config.local.js",
  "extra.css",
+ "favicon-32.png",
+ "favicon.png",
  "fonts.css",
  "fonts/anta-latin-400-normal.woff2",
  "fonts/coming-soon-latin-400-normal.woff2",
@@ -20,6 +23,7 @@ const ASSETS = [
  "icons/icon-512.png",
  "icons/icon.svg",
  "index.html",
+ "logo.png",
  "manifest.webmanifest",
  "style.css",
  "vendor/591.supabase.js",
