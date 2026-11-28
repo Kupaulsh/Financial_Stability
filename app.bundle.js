@@ -2885,6 +2885,11 @@
   function renderSettings() {
     const box = el("div");
     box.style.maxWidth = "480px";
+    if (!auth.enabled) {
+      const off = el("div", "account-badge");
+      off.innerHTML = '<span><span class="material-icons-outlined" style="vertical-align:middle;font-size:16px">cloud_off</span> Cloud sync is OFF in this build<br><small class="muted">Supabase isn\'t set up here, so data stays on this device only. Create <b>config.local.js</b> next to index.html (copy config.local.example.js) and rebuild.</small></span>';
+      box.appendChild(off);
+    }
     if (auth.enabled) {
       const acct = el("div", "account-badge");
       if (auth.user) {
